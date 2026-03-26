@@ -70,8 +70,8 @@ class NetworkVisualizerConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _test_connection(self, host: str, password: str) -> None:
         """Test if we can connect to the router."""
         def _test():
-            from tplinkrouterc6u import TplinkRouter
-            router = TplinkRouter(host, password)
+            from tplinkrouterc6u import TplinkRouterSG
+            router = TplinkRouterSG(host, password, verify_ssl=False)
             try:
                 router.authorize()
             finally:

@@ -45,38 +45,48 @@ class NetworkVisualizerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _poll_router(self) -> dict[str, Any]:
         """Poll the router (runs in executor thread). Login → fetch → logout."""
-        from tplinkrouterc6u import TplinkRouter, Connection
+        from tplinkrouterc6u import TplinkRouterSG
 
-        router = TplinkRouter(self._host, self._password)
-        router.single_request_mode = False  # batch operations
+        router = TplinkRouterSG(self._host, self._password, verify_ssl=False)
 
         try:
             router.authorize()
-
-            # Get all connected clients
-            clients_raw = router.get_status()
+            status = router.get_status()
 
             clients = []
-            if clients_raw and hasattr(clients_raw, 'clients'):
-                for mac, client in clients_raw.clients.items():
+            if status and hasattr(status, "devices"):
+                for dev in status.devices:
+                    ip = str(dev.ipaddr) if hasattr(dev, "ipaddr") else ""
+                    # Skip devices with no IP (disconnected/mesh relays)
+                    is_online = ip != "0.0.0.0" and ip != ""
+
                     clients.append({
-                        "mac": str(mac),
-                        "ip": str(client.ipaddr) if hasattr(client, 'ipaddr') else "",
-                        "hostname": str(client.hostname) if hasattr(client, 'hostname') else "",
-                        "online": True,
-                        "band": str(client.type) if hasattr(client, 'type') else "",
+                        "mac": str(dev.macaddr) if hasattr(dev, "macaddr") else "",
+                        "ip": ip,
+                        "hostname": str(dev.hostname) if hasattr(dev, "hostname") else "",
+                        "online": is_online,
+                        "band": str(dev.type).replace("Connection.", "") if hasattr(dev, "type") else "",
+                        "signal": int(dev.signal) if hasattr(dev, "signal") and dev.signal else None,
+                        "up_speed": int(dev.up_speed) if hasattr(dev, "up_speed") and dev.up_speed else 0,
+                        "down_speed": int(dev.down_speed) if hasattr(dev, "down_speed") and dev.down_speed else 0,
+                        "traffic_usage": int(dev.traffic_usage) if hasattr(dev, "traffic_usage") and dev.traffic_usage else 0,
                     })
 
-            # Get basic router info
             router_info = {
                 "host": self._host,
-                "client_count": len(clients),
+                "client_count": status.clients_total if status else 0,
+                "wifi_clients": status.wifi_clients_total if status else 0,
+                "wired_clients": status.wired_total if status else 0,
+                "cpu_usage": status.cpu_usage if status else 0,
+                "mem_usage": status.mem_usage if status else 0,
+                "wan_ip": str(status.wan_ipv4_addr) if status else "",
+                "lan_ip": str(status.lan_ipv4_addr) if status else "",
+                "wan_uptime": status.wan_ipv4_uptime if status else 0,
             }
 
-            # Check internet connectivity
-            internet_online = True
-            if clients_raw and hasattr(clients_raw, 'wan_ipv4_uptime'):
-                internet_online = clients_raw.wan_ipv4_uptime is not None
+            internet_online = bool(
+                status and status.wan_ipv4_uptime and status.wan_ipv4_uptime > 0
+            )
 
             return {
                 "clients": clients,
@@ -91,4 +101,4 @@ class NetworkVisualizerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 router.logout()
             except Exception:
-                _LOGGER.debug("Failed to logout from router (may already be logged out)")
+                _LOGGER.debug("Failed to logout from router")
