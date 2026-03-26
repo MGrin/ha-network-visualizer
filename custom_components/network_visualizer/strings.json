@@ -1,0 +1,18 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to TP-Link Router",
+        "description": "Enter your TP-Link router credentials. The integration will poll every {scan_interval} seconds with explicit login/logout to minimize admin UI lockout.",
+        "data": {
+          "router_host": "Router IP address",
+          "router_password": "Router admin password",
+          "scan_interval": "Scan interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the router. Check IP and password."
+    }
+  }
+}

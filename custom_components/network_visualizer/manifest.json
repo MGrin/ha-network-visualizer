@@ -1,0 +1,11 @@
+{
+  "domain": "network_visualizer",
+  "name": "Network Visualizer",
+  "codeowners": ["@MGrin"],
+  "config_flow": true,
+  "documentation": "https://github.com/MGrin/ha-network-visualizer",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/MGrin/ha-network-visualizer/issues",
+  "requirements": ["tplinkrouterc6u>=5.0.0"],
+  "version": "0.1.0"
+}
