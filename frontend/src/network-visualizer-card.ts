@@ -27,6 +27,20 @@ function fmtBytes(b: number): string {
 
 function fmtBand(b: string): string { return (b || "").replace("HOST_", "").replace("WIRED", "Wired"); }
 
+function fmtSignal(n: NetworkNode): string {
+  if (n.band === "WIRED" || n.type === "ha") return "🔗 Wired";
+  if (n.type === "router" || n.type === "mesh" || n.type === "internet") return "-";
+  if (n.type.includes("zigbee") || n.type.includes("zha")) {
+    const lqi = n.signal;
+    const rssi = (n as any).rssi;
+    if (lqi != null && lqi > 0) return `${lqi} LQI`;
+    if (rssi != null && rssi !== 0) return `${rssi} dBm`;
+    return "n/a";
+  }
+  if (n.signal != null) return `${n.signal} dBm`;
+  return "-";
+}
+
 type ViewMode = "graph" | "table";
 
 class NetworkVisualizerCard extends HTMLElement {
@@ -308,8 +322,9 @@ class NetworkVisualizerCard extends HTMLElement {
     if (closest) {
       const lines = [`<b>${closest.name}</b>`];
       if (closest.ip) lines.push(closest.ip);
-      if (closest.signal !== undefined) lines.push(`${closest.signal}${closest.type.includes("zigbee") ? " LQI" : " dBm"}`);
-      if (closest.band) lines.push(fmtBand(closest.band));
+      const sig = fmtSignal(closest);
+      if (sig !== "-") lines.push(sig);
+      if (closest.band && closest.band !== "WIRED") lines.push(fmtBand(closest.band));
       tip.innerHTML = lines.join(" &middot; ");
       const p = this.np.get(closest.id)!;
       const sz = (NODE_SIZES[closest.type] || 5) * 1.8;
@@ -327,8 +342,10 @@ class NetworkVisualizerCard extends HTMLElement {
     const rows: [string, string][] = [];
     if (n.ip) rows.push(["IP Address", n.ip]);
     if (n.mac) rows.push(["MAC Address", n.mac]);
-    if (n.signal !== undefined) rows.push([n.type.includes("zigbee") ? "Link Quality (LQI)" : "Signal Strength", `<span class="${this.sc(n)}">${n.signal}${n.type.includes("zigbee") ? "" : " dBm"}</span>`]);
-    if (n.band) rows.push(["WiFi Band", fmtBand(n.band)]);
+    const sigStr = fmtSignal(n);
+    if (sigStr !== "-") rows.push(["Connection", `<span class="${this.sc(n)}">${sigStr}</span>`]);
+    if (n.band && n.band !== "WIRED") rows.push(["WiFi Band", fmtBand(n.band)]);
+    if ((n as any).rssi != null && (n as any).rssi !== 0) rows.push(["RSSI", `${(n as any).rssi} dBm`]);
     if (n.manufacturer) rows.push(["Manufacturer", n.manufacturer]);
     if (n.model) rows.push(["Model", n.model]);
     rows.push(["Network Type", n.type]);
@@ -364,7 +381,7 @@ class NetworkVisualizerCard extends HTMLElement {
       ["Name", "name", n => n.name || "-"],
       ["IP", "ip", n => n.ip || "-"],
       ["MAC", "mac", n => n.mac || "-"],
-      ["Signal", "signal", n => n.signal !== undefined ? `${n.signal}${n.type.includes("zigbee") ? "" : " dBm"}` : "-"],
+      ["Signal", "signal", n => fmtSignal(n)],
       ["Band", "band", n => fmtBand(n.band || "-")],
       ["Type", "type", n => n.type],
       ["Traffic", "traffic", n => (n as any).traffic ? fmtBytes((n as any).traffic) : "-"],
@@ -523,7 +540,14 @@ class NetworkVisualizerCard extends HTMLElement {
           if (haDevice?.area_id) haArea = haDevice.area_id;
         }
         const t = dev.device_type === "Router" ? "zigbee-router" as const : "zigbee-enddevice" as const;
-        const n: any = { id: `z-${dev.ieee}`, name, type: t, floor: 1, manufacturer: dev.manufacturer, model: dev.model, signal: dev.lqi, online: true, val: 5, haArea };
+        const n: any = {
+          id: `z-${dev.ieee}`, name, type: t, floor: 1, manufacturer: dev.manufacturer, model: dev.model,
+          signal: dev.lqi, rssi: dev.rssi, online: true, val: 5,
+          haArea: haArea || dev.area_id || "",
+          powerSource: dev.power_source,
+          lastSeen: dev.last_seen,
+          haEntities: dev.entities?.map((e: any) => e.entity_id) || [],
+        };
         nodes.push(n);
         if (coord) links.push({ source: `z-${coord.ieee}`, target: `z-${dev.ieee}`, strength: dev.lqi ? Math.min(1, dev.lqi / 255) : 0.5 });
       }
@@ -532,8 +556,9 @@ class NetworkVisualizerCard extends HTMLElement {
   }
 
   private sc(n: NetworkNode): string {
+    if (n.band === "WIRED" || n.type === "ha") return "sg"; // Wired is always good
     if (!n.signal) return "";
-    if (n.type.includes("zigbee")) return n.signal > 200 ? "sg" : n.signal > 100 ? "so" : "sw";
+    if (n.type.includes("zigbee") || n.type.includes("zha")) return n.signal > 200 ? "sg" : n.signal > 100 ? "so" : "sw";
     return n.signal > -50 ? "sg" : n.signal > -70 ? "so" : "sw";
   }
 }
