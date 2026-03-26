@@ -70,6 +70,11 @@ class NetworkVisualizerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "up_speed": int(dev.up_speed) if hasattr(dev, "up_speed") and dev.up_speed else 0,
                         "down_speed": int(dev.down_speed) if hasattr(dev, "down_speed") and dev.down_speed else 0,
                         "traffic_usage": int(dev.traffic_usage) if hasattr(dev, "traffic_usage") and dev.traffic_usage else 0,
+                        "online_time": str(dev.online_time) if hasattr(dev, "online_time") and dev.online_time else "0",
+                        "rx_rate": int(dev.rx_rate) if hasattr(dev, "rx_rate") and dev.rx_rate else 0,
+                        "tx_rate": int(dev.tx_rate) if hasattr(dev, "tx_rate") and dev.tx_rate else 0,
+                        "packets_sent": int(dev.packets_sent) if hasattr(dev, "packets_sent") and dev.packets_sent else 0,
+                        "packets_received": int(dev.packets_received) if hasattr(dev, "packets_received") and dev.packets_received else 0,
                     })
 
             router_info = {
