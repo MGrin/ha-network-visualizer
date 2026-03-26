@@ -366,12 +366,21 @@ class NetworkVisualizerCard extends HTMLElement {
   private hideDet() { this.shadow.getElementById("det")?.classList.add("hid"); this.sel = null; }
 
   // Known DHCP-reserved MACs (from device-mapping.md)
+  // Known devices with DHCP reservations (smart home + personal devices)
   private knownMACs = new Set([
+    // Smart home devices (from device-mapping.md)
     "d8-d6-68-43-68-3f", "b8-06-0d-18-b3-b5", "b8-06-0d-78-e9-69",
     "38-a5-c9-9c-f3-e4", "3c-0b-59-8e-f5-b5", "3c-0b-59-8e-bd-11",
     "e0-98-06-a6-87-38", "e0-98-06-a6-8b-d3", "70-4a-0e-0c-20-36",
     "ac-ba-c0-02-5d-38", "38-2c-e5-55-47-e4", "f8-17-2d-bb-2e-e6",
     "dc-ed-83-d3-24-9f", "2c-cf-67-2a-57-f0", "68-7f-f0-5f-56-24",
+    // Personal devices (private/randomized WiFi MACs)
+    "b8-01-1f-25-7d-e7", // iPhone 17 Pro Valeriia
+    "28-8f-f6-30-c4-36", // iPhone 14 Pro Valeriia
+    "fe-bf-05-f2-7a-fe", // MacBook Air M2 Valeriia
+    "8c-33-96-7e-90-13", // iPhone 16e Nikita
+    "a6-27-34-5f-05-c1", // MacBook Air M4 Nikita
+    "7a-f6-c3-5a-a2-f4", // Xiaomi 12 Pro
   ]);
 
   private isKnownDevice(n: NetworkNode): boolean {
