@@ -66,7 +66,7 @@ class NetworkVisualizerCard extends HTMLElement {
   private isPan = false; private panStartX = 0; private panStartY = 0;
   private camStartX = 0; private camStartY = 0;
   // View
-  private view: ViewMode = "graph";
+  private view: ViewMode = "table";
   private sortCol = "name"; private sortAsc = true;
 
   constructor() { super(); this.shadow = this.attachShadow({ mode: "open" }); }
@@ -96,14 +96,14 @@ class NetworkVisualizerCard extends HTMLElement {
     this.shadow.innerHTML = `<style>${CSS}</style>
     <div class="root">
       <div class="bar">
+        <div class="tabs">
+          <button class="tab ${this.view === "graph" ? "active" : ""}" data-v="graph">Graph</button>
+          <button class="tab ${this.view === "table" ? "active" : ""}" data-v="table">Table</button>
+        </div>
         <div class="stats">
           <span class="st"><b id="s-on">-</b> online</span>
           <span class="st"><b id="s-wi">-</b> WiFi</span>
           <span class="st"><b id="s-zb">-</b> Zigbee</span>
-        </div>
-        <div class="tabs">
-          <button class="tab ${this.view === "graph" ? "active" : ""}" data-v="graph">Graph</button>
-          <button class="tab ${this.view === "table" ? "active" : ""}" data-v="table">Table</button>
         </div>
       </div>
       <div class="body">
@@ -365,16 +365,58 @@ class NetworkVisualizerCard extends HTMLElement {
 
   private hideDet() { this.shadow.getElementById("det")?.classList.add("hid"); this.sel = null; }
 
+  // Known DHCP-reserved MACs (from device-mapping.md)
+  private knownMACs = new Set([
+    "d8-d6-68-43-68-3f", "b8-06-0d-18-b3-b5", "b8-06-0d-78-e9-69",
+    "38-a5-c9-9c-f3-e4", "3c-0b-59-8e-f5-b5", "3c-0b-59-8e-bd-11",
+    "e0-98-06-a6-87-38", "e0-98-06-a6-8b-d3", "70-4a-0e-0c-20-36",
+    "ac-ba-c0-02-5d-38", "38-2c-e5-55-47-e4", "f8-17-2d-bb-2e-e6",
+    "dc-ed-83-d3-24-9f", "2c-cf-67-2a-57-f0", "68-7f-f0-5f-56-24",
+  ]);
+
+  private isKnownDevice(n: NetworkNode): boolean {
+    if (!n.mac) return true; // Infrastructure nodes are "known"
+    return this.knownMACs.has(n.mac.toLowerCase());
+  }
+
+  private getGroup(n: NetworkNode): string {
+    if (n.type === "router" || n.type === "mesh" || n.type === "ha" || n.type === "internet") return "infra";
+    if (n.band === "WIRED") return "wired";
+    if (n.band?.includes("5G")) return "5g";
+    if (n.band?.includes("2G")) return "2g";
+    if (n.type.includes("zigbee") || n.type.includes("zha")) return "zigbee";
+    return "other";
+  }
+
   // TABLE VIEW
   private renderTable() {
     const tv = this.shadow.getElementById("tv"); if (!tv) return;
     const clients = this.data.nodes.filter(n => !["internet"].includes(n.type));
-    const sorted = [...clients].sort((a, b) => {
-      let va: any = (a as any)[this.sortCol] ?? "";
-      let vb: any = (b as any)[this.sortCol] ?? "";
-      if (typeof va === "number" && typeof vb === "number") return this.sortAsc ? va - vb : vb - va;
-      return this.sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
-    });
+
+    const groups: [string, string, string, NetworkNode[]][] = [
+      ["wired", "🔗 Wired", "#4caf50", []],
+      ["5g", "📶 WiFi 5GHz", "#42a5f5", []],
+      ["2g", "📡 WiFi 2.4GHz", "#ff9800", []],
+      ["zigbee", "⬡ Zigbee", "#9c27b0", []],
+      ["infra", "🏗️ Infrastructure", "#00e5ff", []],
+      ["other", "❓ Other", "#888", []],
+    ];
+
+    for (const n of clients) {
+      const g = this.getGroup(n);
+      const group = groups.find(([id]) => id === g);
+      if (group) group[3].push(n);
+    }
+
+    // Sort within each group
+    for (const [,,,nodes] of groups) {
+      nodes.sort((a, b) => {
+        let va: any = (a as any)[this.sortCol] ?? "";
+        let vb: any = (b as any)[this.sortCol] ?? "";
+        if (typeof va === "number" && typeof vb === "number") return this.sortAsc ? va - vb : vb - va;
+        return this.sortAsc ? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+      });
+    }
 
     const cols: [string, string, (n: NetworkNode) => string][] = [
       ["", "icon", n => icon(n)],
@@ -382,26 +424,38 @@ class NetworkVisualizerCard extends HTMLElement {
       ["IP", "ip", n => n.ip || "-"],
       ["MAC", "mac", n => n.mac || "-"],
       ["Signal", "signal", n => fmtSignal(n)],
-      ["Band", "band", n => fmtBand(n.band || "-")],
       ["Type", "type", n => n.type],
       ["Traffic", "traffic", n => (n as any).traffic ? fmtBytes((n as any).traffic) : "-"],
       ["↓ Speed", "downSpeed", n => (n as any).downSpeed ? fmtBytes((n as any).downSpeed) + "/s" : "-"],
       ["↑ Speed", "upSpeed", n => (n as any).upSpeed ? fmtBytes((n as any).upSpeed) + "/s" : "-"],
       ["Online", "onlineTime", n => (n as any).onlineTime ? Math.round((n as any).onlineTime / 3600) + "h" : "-"],
-      ["Vendor", "manufacturer", n => n.manufacturer || "-"],
       ["HA Area", "haArea", n => (n as any).haArea || "-"],
     ];
 
-    tv.innerHTML = `<table><thead><tr>${cols.map(([label, key]) =>
+    let html = `<table><thead><tr>${cols.map(([label, key]) =>
       `<th data-col="${key}" class="${this.sortCol === key ? "sorted" : ""}">${label}${this.sortCol === key ? (this.sortAsc ? " ▲" : " ▼") : ""}</th>`
-    ).join("")}</tr></thead><tbody>${sorted.map(n => {
-      const sigClass = this.sc(n);
-      return `<tr class="${this.sel?.id === n.id ? "sel" : ""}" data-id="${n.id}">${cols.map(([, key, fn]) => {
-        const v = fn(n);
-        const cls = key === "signal" ? sigClass : "";
-        return `<td class="${cls}">${v}</td>`;
-      }).join("")}</tr>`;
-    }).join("")}</tbody></table>`;
+    ).join("")}</tr></thead>`;
+
+    for (const [gid, gLabel, gColor, nodes] of groups) {
+      if (nodes.length === 0) continue;
+      html += `<tbody><tr class="group-header"><td colspan="${cols.length}"><span class="gh-dot" style="background:${gColor}"></span>${gLabel} <span class="gh-count">${nodes.length}</span></td></tr>`;
+      for (const n of nodes) {
+        const sigClass = this.sc(n);
+        const isUnknown = !this.isKnownDevice(n);
+        const rowClass = [
+          this.sel?.id === n.id ? "sel" : "",
+          isUnknown ? "unknown-device" : "",
+        ].filter(Boolean).join(" ");
+        html += `<tr class="${rowClass}" data-id="${n.id}">${cols.map(([, key, fn]) => {
+          const v = fn(n);
+          const cls = key === "signal" ? sigClass : "";
+          return `<td class="${cls}">${v}</td>`;
+        }).join("")}</tr>`;
+      }
+      html += `</tbody>`;
+    }
+    html += `</table>`;
+    tv.innerHTML = html;
 
     // Sort on header click
     tv.querySelectorAll("th").forEach(th => {
@@ -594,7 +648,13 @@ th.sorted{color:#00e5ff}
 td{padding:6px;border-bottom:1px solid rgba(255,255,255,0.03);color:rgba(255,255,255,0.7);white-space:nowrap}
 tr:hover td{background:rgba(100,150,255,0.05)}
 tr.sel td{background:rgba(100,150,255,0.1);color:#fff}
+tr.unknown-device td{border-left:3px solid #ff9800;color:#ffb74d}
+tr.unknown-device td:first-child{border-left:none}
+tr.unknown-device:hover td{background:rgba(255,152,0,0.08)}
 td:first-child{text-align:center;font-size:16px}
+.group-header td{background:rgba(20,20,45,0.9)!important;color:rgba(255,255,255,0.6);font-size:12px;font-weight:600;padding:8px 6px 6px;letter-spacing:0.5px;border-bottom:1px solid rgba(100,150,255,0.12)}
+.gh-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.gh-count{color:rgba(255,255,255,0.3);font-weight:400;margin-left:4px}
 .tip{position:absolute;background:rgba(8,8,25,0.92);color:#ccc;padding:6px 10px;border-radius:6px;font-size:11px;line-height:1.4;border:1px solid rgba(100,150,255,0.2);pointer-events:none;z-index:20;white-space:nowrap}
 .tip.hid{display:none}
 .tip b{color:#00e5ff}
