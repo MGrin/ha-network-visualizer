@@ -479,14 +479,19 @@ class NetworkVisualizerCard extends HTMLElement {
     const nodes: NetworkNode[] = [], links: NetworkLink[] = [];
     const cfg = this.cfg!;
 
+    // Get router info from sensor attributes
+    const routerSensor = this.h?.states["sensor.router"];
+    const routerIP = routerSensor?.attributes?.lan_ip || cfg.router_host || "";
+    const haIP = routerSensor?.attributes?.host || "";
+
     nodes.push({ id: "internet", name: "Internet", type: "internet", floor: 0, online: true, val: 5 });
-    nodes.push({ id: "router", name: cfg.router_name || "Router", type: "router", floor: 1, ip: "192.168.0.1", online: true, val: 16 });
+    nodes.push({ id: "router", name: cfg.router_name || "Router", type: "router", floor: 1, ip: routerIP, online: true, val: 16 });
     links.push({ source: "internet", target: "router", strength: 1 });
     if (cfg.mesh_name) {
-      nodes.push({ id: "mesh", name: cfg.mesh_name, type: "mesh", floor: 2, ip: "192.168.0.150", online: true, val: 13 });
+      nodes.push({ id: "mesh", name: cfg.mesh_name, type: "mesh", floor: 2, ip: cfg.mesh_ip || "", online: true, val: 13 });
       links.push({ source: "router", target: "mesh", strength: 0.8 });
     }
-    nodes.push({ id: "ha", name: "Home Assistant", type: "ha", floor: 1, ip: "192.168.0.185", online: true, val: 12 });
+    nodes.push({ id: "ha", name: "Home Assistant", type: "ha", floor: 1, ip: haIP, online: true, val: 12 });
     links.push({ source: "router", target: "ha", strength: 1 });
 
     const ent = this.h?.states[cfg.router_entity || "sensor.connected_clients"];

@@ -78,8 +78,10 @@ export interface CardConfig {
   type: string;
   title?: string;
   router_entity?: string; // sensor.network_visualizer_clients
+  router_host?: string; // router IP (auto-detected from sensor if not set)
   router_name?: string;
   mesh_name?: string;
+  mesh_ip?: string;
   known_devices?: Record<string, { name: string; floor: number; category: string }>;
   height?: number;
 }

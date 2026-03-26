@@ -4,3 +4,5 @@ frontend/node_modules/
 *.pyc
 __pycache__/
 .env
+dist/
+!custom_components/network_visualizer/dist/
