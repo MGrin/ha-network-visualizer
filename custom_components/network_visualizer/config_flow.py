@@ -70,10 +70,18 @@ class NetworkVisualizerConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _test_connection(self, host: str, password: str) -> None:
         """Test if we can connect to the router."""
         def _test():
-            from tplinkrouterc6u import TplinkRouterSG
+            try:
+                from tplinkrouterc6u import TplinkRouterSG
+            except ImportError as ie:
+                _LOGGER.error("Cannot import TplinkRouterSG: %s", ie)
+                raise
             router = TplinkRouterSG(host, password, verify_ssl=False)
             try:
                 router.authorize()
+                _LOGGER.info("Successfully connected to router at %s", host)
+            except Exception as err:
+                _LOGGER.error("Router connection failed: %s: %s", type(err).__name__, err)
+                raise
             finally:
                 try:
                     router.logout()
