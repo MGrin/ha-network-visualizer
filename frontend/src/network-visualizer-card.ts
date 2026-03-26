@@ -1,7 +1,5 @@
-import ForceGraph from "3d-force-graph";
-import * as THREE from "three";
-import { NODE_COLORS, NODE_SIZES, GRAPH_CONFIG, SIGNAL_THRESHOLDS } from "./constants";
-import type { HomeAssistant, CardConfig, GraphData, NetworkNode, NetworkLink, ActionItem } from "./types";
+import { NODE_COLORS, NODE_SIZES, GRAPH_CONFIG } from "./constants";
+import type { HomeAssistant, CardConfig, GraphData, NetworkNode, NetworkLink } from "./types";
 
 const DEVICE_ICONS: Record<string, string> = {
   router: "📡", mesh: "📶", ha: "🏠", internet: "🌐",
@@ -26,25 +24,6 @@ function getDeviceIcon(node: NetworkNode): string {
   return DEVICE_ICONS.default;
 }
 
-// Determine floor: mesh-connected = floor 2, router-connected = floor 1
-function determineFloor(node: NetworkNode, config: CardConfig): number {
-  // Infrastructure positions
-  if (node.type === "internet") return 0;
-  if (node.type === "router") return 1;
-  if (node.type === "mesh") return 2;
-  if (node.type === "ha") return 1;
-  if (node.type.includes("zigbee") || node.type.includes("zha")) return 1;
-
-  // WiFi clients: if connected to 2.4G with weak signal from main router,
-  // likely on floor 2 via mesh. Use known_devices config or band heuristic.
-  const mac = node.mac?.toLowerCase() || "";
-  const known = config.known_devices?.[mac];
-  if (known?.floor !== undefined) return known.floor;
-
-  // Default: floor 1
-  return 1;
-}
-
 class NetworkVisualizerCard extends HTMLElement {
   private hass_?: HomeAssistant;
   private config_?: CardConfig;
@@ -52,7 +31,6 @@ class NetworkVisualizerCard extends HTMLElement {
   private selectedNode: NetworkNode | null = null;
   private zhaDevices: any[] | null = null;
   private haDevices: any[] | null = null;
-  private initialized = false;
   private updateTimeout: number | null = null;
   private lastDataHash = "";
   private shadow: ShadowRoot;
@@ -64,6 +42,7 @@ class NetworkVisualizerCard extends HTMLElement {
   private mouseY = 0;
   private hoverNode: NetworkNode | null = null;
   private dataLoaded = false;
+  private simTick = 0;
 
   constructor() {
     super();
@@ -77,184 +56,165 @@ class NetworkVisualizerCard extends HTMLElement {
     this.scheduleUpdate();
   }
 
-  setConfig(config: CardConfig) {
-    this.config_ = { ...config };
-    this.renderShell();
-  }
-
+  setConfig(config: CardConfig) { this.config_ = { ...config }; this.renderShell(); }
   getCardSize() { return 12; }
-  getGridOptions() { return { columns: 12, rows: 12, min_columns: 6, min_rows: 8 }; }
   connectedCallback() { this.renderShell(); }
-
-  disconnectedCallback() {
-    if (this.animFrame) cancelAnimationFrame(this.animFrame);
-    this.initialized = false;
-  }
+  disconnectedCallback() { if (this.animFrame) cancelAnimationFrame(this.animFrame); }
 
   private scheduleUpdate() {
     if (this.updateTimeout) clearTimeout(this.updateTimeout);
-    this.updateTimeout = window.setTimeout(() => this.updateData(), this.dataLoaded ? 5000 : 500);
+    this.updateTimeout = window.setTimeout(() => this.updateData(), this.dataLoaded ? 10000 : 500);
   }
 
   private async fetchZHADevices() {
     if (!this.hass_) return;
-    try { this.zhaDevices = await this.hass_.callWS({ type: "zha/devices" }); } catch { this.zhaDevices = null; }
+    try { this.zhaDevices = await this.hass_.callWS({ type: "zha/devices" }); } catch {}
   }
 
   private async fetchHADevices() {
     if (!this.hass_) return;
-    try { this.haDevices = await this.hass_.callWS({ type: "config/device_registry/list" }); } catch { this.haDevices = null; }
+    try { this.haDevices = await this.hass_.callWS({ type: "config/device_registry/list" }); } catch {}
   }
 
   private renderShell() {
     if (!this.config_) return;
     this.shadow.innerHTML = `<style>${STYLES}</style>
       <div class="root">
-        <div class="stats-bar" id="stats">
+        <div class="stats-bar">
           <div class="stat"><span class="count" id="s-online">-</span> online</div>
           <div class="stat"><span class="count" id="s-wifi">-</span> WiFi</div>
           <div class="stat"><span class="count" id="s-zigbee">-</span> Zigbee</div>
-          <div class="stat"><span class="count" id="s-f1">-</span> Floor 1</div>
-          <div class="stat"><span class="count" id="s-f2">-</span> Floor 2</div>
         </div>
-        <div class="canvas-wrap" id="canvas-wrap">
-          <canvas id="canvas"></canvas>
-          <div id="tooltip" class="tooltip hidden"></div>
-          <div id="detail" class="detail-panel hidden"></div>
-          <div id="loading" class="loading">Connecting to router...</div>
+        <div class="canvas-wrap" id="wrap">
+          <canvas id="c"></canvas>
+          <div id="tip" class="tip hidden"></div>
+          <div id="det" class="det hidden"></div>
+          <div id="load" class="load">Connecting to network...</div>
         </div>
         <div class="legend">
-          <div class="legend-item"><span class="legend-dot" style="background:${NODE_COLORS.router}"></span>Router</div>
-          <div class="legend-item"><span class="legend-dot" style="background:${NODE_COLORS["wifi-client"]}"></span>WiFi</div>
-          <div class="legend-item"><span class="legend-dot" style="background:${NODE_COLORS["zha-coordinator"]}"></span>Zigbee</div>
-          <div class="legend-item"><span class="legend-dot" style="background:${NODE_COLORS.ha}"></span>Home Assistant</div>
+          <span class="li"><span class="ld" style="background:${NODE_COLORS.router}"></span>Router</span>
+          <span class="li"><span class="ld" style="background:${NODE_COLORS["wifi-client"]}"></span>WiFi</span>
+          <span class="li"><span class="ld" style="background:${NODE_COLORS["zha-coordinator"]}"></span>Zigbee</span>
+          <span class="li"><span class="ld" style="background:${NODE_COLORS.ha}"></span>HA</span>
         </div>
       </div>`;
-
     requestAnimationFrame(() => this.initCanvas());
   }
 
   private initCanvas() {
-    const wrap = this.shadow.getElementById("canvas-wrap");
-    const canvas = this.shadow.getElementById("canvas") as HTMLCanvasElement;
+    const wrap = this.shadow.getElementById("wrap");
+    const canvas = this.shadow.getElementById("c") as HTMLCanvasElement;
     if (!wrap || !canvas) return;
-
     this.canvas = canvas;
+
     const resize = () => {
-      const rect = wrap.getBoundingClientRect();
-      canvas.width = rect.width * devicePixelRatio;
-      canvas.height = rect.height * devicePixelRatio;
-      canvas.style.width = rect.width + "px";
-      canvas.style.height = rect.height + "px";
+      const r = wrap.getBoundingClientRect();
+      canvas.width = r.width * devicePixelRatio;
+      canvas.height = r.height * devicePixelRatio;
+      canvas.style.width = r.width + "px";
+      canvas.style.height = r.height + "px";
+      // Reposition nodes when resized
+      if (this.dataLoaded) this.spreadNodes();
     };
     resize();
     new ResizeObserver(resize).observe(wrap);
 
-    // Mouse events
     canvas.addEventListener("mousemove", (e) => {
-      const rect = canvas.getBoundingClientRect();
-      this.mouseX = e.clientX - rect.left;
-      this.mouseY = e.clientY - rect.top;
+      const r = canvas.getBoundingClientRect();
+      this.mouseX = e.clientX - r.left;
+      this.mouseY = e.clientY - r.top;
       this.handleHover();
       if (this.dragNode) {
-        const pos = this.nodePositions.get(this.dragNode.id);
-        if (pos) { pos.x = this.mouseX; pos.y = this.mouseY; pos.vx = 0; pos.vy = 0; }
+        const p = this.nodePositions.get(this.dragNode.id);
+        if (p) { p.x = this.mouseX; p.y = this.mouseY; p.vx = 0; p.vy = 0; }
       }
     });
-    canvas.addEventListener("mousedown", () => {
-      if (this.hoverNode) this.dragNode = this.hoverNode;
-    });
+    canvas.addEventListener("mousedown", () => { if (this.hoverNode) this.dragNode = this.hoverNode; });
     canvas.addEventListener("mouseup", () => {
-      if (this.dragNode && !this.hoverNode) { this.hideDetail(); }
-      else if (this.hoverNode) { this.showDetail(this.hoverNode); }
+      if (this.hoverNode) this.showDetail(this.hoverNode);
+      else if (!this.dragNode) this.hideDetail();
       this.dragNode = null;
     });
     canvas.addEventListener("mouseleave", () => {
       this.hoverNode = null;
-      this.shadow.getElementById("tooltip")?.classList.add("hidden");
+      this.shadow.getElementById("tip")?.classList.add("hidden");
+      this.dragNode = null;
     });
 
-    this.initialized = true;
     this.animate();
   }
 
   private animate() {
+    this.simTick++;
+    if (this.simTick < 300) this.simulationStep(); // Stop simulation after settling
     this.drawFrame();
-    this.simulationStep();
     this.animFrame = requestAnimationFrame(() => this.animate());
   }
 
   private simulationStep() {
-    // Simple force simulation
     const nodes = this.graphData.nodes;
     const links = this.graphData.links;
+    if (!this.canvas) return;
+    const w = this.canvas.width / devicePixelRatio;
+    const h = this.canvas.height / devicePixelRatio;
+    const pad = 50;
 
     for (const node of nodes) {
-      let pos = this.nodePositions.get(node.id);
-      if (!pos) continue;
-      if (node.id === this.dragNode?.id) continue;
+      const pos = this.nodePositions.get(node.id);
+      if (!pos || node.id === this.dragNode?.id) continue;
 
       let fx = 0, fy = 0;
 
-      // Repulsion between nodes
+      // Repulsion
       for (const other of nodes) {
         if (other.id === node.id) continue;
         const op = this.nodePositions.get(other.id);
         if (!op) continue;
-        const dx = pos.x - op.x;
-        const dy = pos.y - op.y;
+        const dx = pos.x - op.x, dy = pos.y - op.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        if (dist < 200) {
-          const force = 300 / (dist * dist);
-          fx += (dx / dist) * force;
-          fy += (dy / dist) * force;
+        if (dist < 150) {
+          const f = 200 / (dist * dist);
+          fx += (dx / dist) * f;
+          fy += (dy / dist) * f;
         }
       }
 
-      // Attraction along links
+      // Link attraction
       for (const link of links) {
         const src = typeof link.source === "string" ? link.source : (link.source as any).id;
         const tgt = typeof link.target === "string" ? link.target : (link.target as any).id;
-        let otherId: string | null = null;
-        if (src === node.id) otherId = tgt;
-        else if (tgt === node.id) otherId = src;
-        if (!otherId) continue;
-        const op = this.nodePositions.get(otherId);
+        let oid: string | null = null;
+        if (src === node.id) oid = tgt;
+        else if (tgt === node.id) oid = src;
+        if (!oid) continue;
+        const op = this.nodePositions.get(oid);
         if (!op) continue;
-        const dx = op.x - pos.x;
-        const dy = op.y - pos.y;
+        const dx = op.x - pos.x, dy = op.y - pos.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const force = (dist - 80) * 0.003 * (link.strength || 0.5);
-        fx += (dx / dist) * force;
-        fy += (dy / dist) * force;
+        const f = (dist - 90) * 0.004 * (link.strength || 0.5);
+        fx += (dx / dist) * f;
+        fy += (dy / dist) * f;
       }
 
-      // Floor containment: keep nodes in their floor zone
-      const canvas = this.canvas!;
-      const w = canvas.width / devicePixelRatio;
-      const h = canvas.height / devicePixelRatio;
-      const floorY = this.getFloorY(node.floor, h);
-      const floorForce = (floorY - pos.y) * 0.02;
-      fy += floorForce;
+      // Center gravity (mild)
+      fx += (w / 2 - pos.x) * 0.001;
+      fy += (h / 2 - pos.y) * 0.001;
 
-      // Keep within bounds
-      if (pos.x < 40) fx += 1;
-      if (pos.x > w - 40) fx -= 1;
+      // Bounds
+      if (pos.x < pad) fx += 2;
+      if (pos.x > w - pad) fx -= 2;
+      if (pos.y < pad) fy += 2;
+      if (pos.y > h - pad) fy -= 2;
 
-      pos.vx = (pos.vx + fx) * 0.85;
-      pos.vy = (pos.vy + fy) * 0.85;
+      pos.vx = (pos.vx + fx) * 0.8;
+      pos.vy = (pos.vy + fy) * 0.8;
       pos.x += pos.vx;
       pos.y += pos.vy;
-    }
-  }
 
-  private getFloorY(floor: number, h: number): number {
-    // Floor 0 (internet) = very top
-    // Floor 1 (ground floor) = upper half
-    // Floor 2 (second floor) = lower half
-    if (floor === 0) return 50;
-    if (floor === 2) return h * 0.72;
-    return h * 0.35;
+      // Hard clamp
+      pos.x = Math.max(pad, Math.min(w - pad, pos.x));
+      pos.y = Math.max(pad, Math.min(h - pad, pos.y));
+    }
   }
 
   private drawFrame() {
@@ -262,211 +222,144 @@ class NetworkVisualizerCard extends HTMLElement {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
     const dpr = devicePixelRatio;
-    const w = canvas.width / dpr;
-    const h = canvas.height / dpr;
+    const w = canvas.width / dpr, h = canvas.height / dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // Clear
+    // Background
     ctx.fillStyle = GRAPH_CONFIG.BACKGROUND_COLOR;
     ctx.fillRect(0, 0, w, h);
 
-    // Draw floor zones
-    this.drawFloors(ctx, w, h);
-
-    // Draw links
-    ctx.lineWidth = 1;
+    // Links
     for (const link of this.graphData.links) {
       const src = typeof link.source === "string" ? link.source : (link.source as any).id;
       const tgt = typeof link.target === "string" ? link.target : (link.target as any).id;
-      const sp = this.nodePositions.get(src);
-      const tp = this.nodePositions.get(tgt);
+      const sp = this.nodePositions.get(src), tp = this.nodePositions.get(tgt);
       if (!sp || !tp) continue;
-      const alpha = 0.08 + (link.strength || 0.5) * 0.15;
-      ctx.strokeStyle = `rgba(100,180,255,${alpha})`;
+      const a = 0.06 + (link.strength || 0.5) * 0.12;
+      ctx.strokeStyle = `rgba(100,180,255,${a})`;
+      ctx.lineWidth = 0.5 + (link.strength || 0.5) * 1;
       ctx.beginPath();
       ctx.moveTo(sp.x, sp.y);
       ctx.lineTo(tp.x, tp.y);
       ctx.stroke();
     }
 
-    // Draw nodes
-    for (const node of this.graphData.nodes) {
+    // Nodes (draw smaller nodes first, then larger on top)
+    const sorted = [...this.graphData.nodes].sort((a, b) => (a.val || 5) - (b.val || 5));
+    for (const node of sorted) {
       const pos = this.nodePositions.get(node.id);
       if (!pos) continue;
       this.drawNode(ctx, node, pos.x, pos.y);
     }
   }
 
-  private drawFloors(ctx: CanvasRenderingContext2D, w: number, h: number) {
-    const pad = 20;
-    const midY = h * 0.52;
-    const houseW = w - pad * 2;
-
-    // Floor 1 (Ground) zone
-    ctx.fillStyle = "rgba(40, 80, 120, 0.08)";
-    ctx.strokeStyle = "rgba(100, 150, 255, 0.15)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([6, 4]);
-    const f1Top = 70;
-    const f1Bot = midY - 10;
-    this.roundRect(ctx, pad, f1Top, houseW, f1Bot - f1Top, 12);
-    ctx.fill();
-    ctx.stroke();
-
-    // Floor 1 label
-    ctx.setLineDash([]);
-    ctx.font = "12px system-ui";
-    ctx.fillStyle = "rgba(100, 150, 255, 0.4)";
-    ctx.fillText("Floor 1 — Ground", pad + 12, f1Top + 18);
-
-    // Floor 2 zone
-    ctx.fillStyle = "rgba(80, 40, 120, 0.08)";
-    ctx.strokeStyle = "rgba(180, 100, 255, 0.15)";
-    ctx.setLineDash([6, 4]);
-    const f2Top = midY + 10;
-    const f2Bot = h - 30;
-    this.roundRect(ctx, pad, f2Top, houseW, f2Bot - f2Top, 12);
-    ctx.fill();
-    ctx.stroke();
-
-    // Floor 2 label
-    ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(180, 100, 255, 0.4)";
-    ctx.fillText("Floor 2 — Upper", pad + 12, f2Top + 18);
-
-    // Internet zone (very top)
-    ctx.fillStyle = "rgba(255,255,255,0.03)";
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
-    ctx.setLineDash([4, 4]);
-    this.roundRect(ctx, w / 2 - 60, 5, 120, 55, 8);
-    ctx.fill();
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = "rgba(255,255,255,0.2)";
-    ctx.font = "10px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText("WAN", w / 2, 18);
-    ctx.textAlign = "start";
-  }
-
-  private roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
-  }
-
   private drawNode(ctx: CanvasRenderingContext2D, node: NetworkNode, x: number, y: number) {
-    const size = (NODE_SIZES[node.type] || 5) * 2;
+    const baseSize = NODE_SIZES[node.type] || 5;
+    const size = baseSize * 1.8;
     const color = NODE_COLORS[node.type] || "#42a5f5";
     const icon = getDeviceIcon(node);
-    const isHovered = this.hoverNode?.id === node.id;
-    const isSelected = this.selectedNode?.id === node.id;
+    const isHov = this.hoverNode?.id === node.id;
+    const isSel = this.selectedNode?.id === node.id;
 
-    // Glow for hovered/selected
-    if (isHovered || isSelected) {
+    // Glow
+    if (isHov || isSel) {
       ctx.shadowColor = color;
-      ctx.shadowBlur = 20;
+      ctx.shadowBlur = 15;
     }
 
     // Circle
     ctx.beginPath();
     ctx.arc(x, y, size, 0, Math.PI * 2);
     ctx.fillStyle = color;
-    ctx.globalAlpha = isHovered ? 1 : 0.85;
+    ctx.globalAlpha = isHov ? 1 : 0.8;
     ctx.fill();
     ctx.globalAlpha = 1;
-    ctx.strokeStyle = isSelected ? "#fff" : "rgba(255,255,255,0.2)";
-    ctx.lineWidth = isSelected ? 2 : 1;
+    ctx.strokeStyle = isSel ? "#fff" : "rgba(255,255,255,0.15)";
+    ctx.lineWidth = isSel ? 2.5 : 0.8;
     ctx.stroke();
     ctx.shadowBlur = 0;
 
     // Icon
-    ctx.font = `${size * 1.1}px serif`;
+    const iconSize = Math.max(12, size * 1.0);
+    ctx.font = `${iconSize}px serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#fff";
     ctx.fillText(icon, x, y);
 
-    // Name label
-    ctx.font = `${Math.max(9, size * 0.55)}px system-ui, sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    // Label
+    const fontSize = Math.max(8, Math.min(11, size * 0.5));
+    ctx.font = `${fontSize}px system-ui, sans-serif`;
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    const shortName = (node.name || "").length > 18 ? (node.name || "").substring(0, 16) + "…" : (node.name || "");
-    ctx.fillText(shortName, x, y + size + 4);
+    const maxLen = 14;
+    const label = (node.name || "").length > maxLen ? (node.name || "").substring(0, maxLen - 1) + "…" : (node.name || "");
+    ctx.fillText(label, x, y + size + 3);
+
+    // Reset
     ctx.textAlign = "start";
     ctx.textBaseline = "alphabetic";
   }
 
   private handleHover() {
     let closest: NetworkNode | null = null;
-    let closestDist = 30; // Hover radius
-
+    let closestDist = 999;
     for (const node of this.graphData.nodes) {
       const pos = this.nodePositions.get(node.id);
       if (!pos) continue;
-      const dx = this.mouseX - pos.x;
-      const dy = this.mouseY - pos.y;
+      const dx = this.mouseX - pos.x, dy = this.mouseY - pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      const size = (NODE_SIZES[node.type] || 5) * 2;
-      if (dist < size + 10 && dist < closestDist) {
-        closest = node;
-        closestDist = dist;
-      }
+      const hitR = (NODE_SIZES[node.type] || 5) * 1.8 + 8;
+      if (dist < hitR && dist < closestDist) { closest = node; closestDist = dist; }
     }
-
     this.hoverNode = closest;
-    const tooltip = this.shadow.getElementById("tooltip");
-    if (!tooltip) return;
+    const tip = this.shadow.getElementById("tip");
+    if (!tip) return;
 
     if (closest) {
       const lines = [`<b>${closest.name}</b>`];
-      if (closest.ip) lines.push(`IP: ${closest.ip}`);
-      if (closest.mac) lines.push(`MAC: ${closest.mac}`);
-      if (closest.signal !== undefined) lines.push(`Signal: ${closest.signal}${closest.type.includes("zigbee") ? " LQI" : " dBm"}`);
+      if (closest.ip) lines.push(`${closest.ip}`);
+      if (closest.signal !== undefined) lines.push(`${closest.signal}${closest.type.includes("zigbee") ? " LQI" : " dBm"}`);
       if (closest.band) lines.push(closest.band.replace("HOST_", ""));
-      tooltip.innerHTML = lines.join("<br>");
-      tooltip.style.left = (this.mouseX + 15) + "px";
-      tooltip.style.top = (this.mouseY - 10) + "px";
-      tooltip.classList.remove("hidden");
+      tip.innerHTML = lines.join(" &middot; ");
+
+      // Position near the node, not the cursor
+      const pos = this.nodePositions.get(closest.id)!;
+      const nodeSize = (NODE_SIZES[closest.type] || 5) * 1.8;
+      tip.style.left = (pos.x + nodeSize + 10) + "px";
+      tip.style.top = (pos.y - 12) + "px";
+      tip.classList.remove("hidden");
       this.canvas!.style.cursor = "pointer";
     } else {
-      tooltip.classList.add("hidden");
+      tip.classList.add("hidden");
       this.canvas!.style.cursor = "default";
     }
   }
 
   private showDetail(node: NetworkNode) {
-    const panel = this.shadow.getElementById("detail");
+    const panel = this.shadow.getElementById("det");
     if (!panel) return;
     this.selectedNode = node;
     const sc = this.getSignalClass(node);
     panel.innerHTML = `
-      <h3>${node.name} <button id="close-btn" class="close-btn">&times;</button></h3>
-      ${node.ip ? `<div class="detail-row"><span class="label">IP</span><span class="value">${node.ip}</span></div>` : ""}
-      ${node.mac ? `<div class="detail-row"><span class="label">MAC</span><span class="value">${node.mac}</span></div>` : ""}
-      ${node.signal !== undefined ? `<div class="detail-row"><span class="label">${node.type.includes("zigbee") ? "LQI" : "Signal"}</span><span class="value ${sc}">${node.signal}${node.type.includes("zigbee") ? "" : " dBm"}</span></div>` : ""}
-      ${node.band ? `<div class="detail-row"><span class="label">Band</span><span class="value">${node.band.replace("HOST_", "")}</span></div>` : ""}
-      ${node.manufacturer ? `<div class="detail-row"><span class="label">Vendor</span><span class="value">${node.manufacturer}</span></div>` : ""}
-      ${node.model ? `<div class="detail-row"><span class="label">Model</span><span class="value">${node.model}</span></div>` : ""}
-      <div class="detail-row"><span class="label">Type</span><span class="value">${node.type}</span></div>
-      <div class="detail-row"><span class="label">Floor</span><span class="value">${node.floor === 2 ? "Second" : "Ground"}</span></div>`;
+      <h3>${node.name}<button id="xbtn" class="xbtn">&times;</button></h3>
+      ${[
+        node.ip && ["IP", node.ip],
+        node.mac && ["MAC", node.mac],
+        node.signal !== undefined && [node.type.includes("zigbee") ? "LQI" : "Signal", `<span class="${sc}">${node.signal}${node.type.includes("zigbee") ? "" : " dBm"}</span>`],
+        node.band && ["Band", node.band.replace("HOST_", "")],
+        node.manufacturer && ["Vendor", node.manufacturer],
+        node.model && ["Model", node.model],
+        ["Type", node.type],
+      ].filter(Boolean).map(([l, v]) => `<div class="dr"><span class="dl">${l}</span><span class="dv">${v}</span></div>`).join("")}`;
     panel.classList.remove("hidden");
-    this.shadow.getElementById("close-btn")?.addEventListener("click", () => this.hideDetail());
+    this.shadow.getElementById("xbtn")?.addEventListener("click", () => this.hideDetail());
   }
 
   private hideDetail() {
-    this.shadow.getElementById("detail")?.classList.add("hidden");
+    this.shadow.getElementById("det")?.classList.add("hidden");
     this.selectedNode = null;
   }
 
@@ -474,43 +367,52 @@ class NetworkVisualizerCard extends HTMLElement {
     if (!this.hass_ || !this.config_) return;
     const newData = this.collectData();
     const newHash = JSON.stringify(newData.nodes.map(n => n.id).sort());
-
     if (newHash !== this.lastDataHash) {
       this.lastDataHash = newHash;
       this.graphData = newData;
-      this.initNodePositions();
+      this.spreadNodes();
+      this.simTick = 0; // Restart simulation
       this.dataLoaded = true;
-      this.shadow.getElementById("loading")?.classList.add("hidden");
+      this.shadow.getElementById("load")?.classList.add("hidden");
     }
     this.updateStats();
   }
 
-  private initNodePositions() {
-    const canvas = this.canvas;
-    if (!canvas) return;
-    const w = canvas.width / devicePixelRatio;
-    const h = canvas.height / devicePixelRatio;
+  private spreadNodes() {
+    if (!this.canvas) return;
+    const w = this.canvas.width / devicePixelRatio;
+    const h = this.canvas.height / devicePixelRatio;
+    const cx = w / 2, cy = h / 2;
 
-    for (const node of this.graphData.nodes) {
+    // Place router at center, others in a circle around it
+    const infra = this.graphData.nodes.filter(n => ["router", "mesh", "ha", "internet"].includes(n.type));
+    const clients = this.graphData.nodes.filter(n => !["router", "mesh", "ha", "internet"].includes(n.type));
+
+    // Infrastructure
+    for (const node of infra) {
       if (this.nodePositions.has(node.id)) continue;
-      const fy = this.getFloorY(node.floor, h);
-      const spread = w * 0.35;
-      const cx = w / 2;
-
-      // Special positioning for infrastructure
-      let x = cx + (Math.random() - 0.5) * spread;
-      let y = fy + (Math.random() - 0.5) * 40;
-
-      if (node.type === "internet") { x = cx; y = 35; }
-      else if (node.type === "router") { x = cx; y = this.getFloorY(1, h) - 30; }
-      else if (node.type === "mesh") { x = cx; y = this.getFloorY(2, h) - 30; }
-      else if (node.type === "ha") { x = cx + 80; y = this.getFloorY(1, h) - 30; }
-      else if (node.type === "zha-coordinator") { x = cx + 140; y = this.getFloorY(1, h); }
-
+      let x = cx, y = cy;
+      if (node.type === "internet") { x = cx; y = 40; }
+      else if (node.type === "router") { x = cx; y = cy; }
+      else if (node.type === "mesh") { x = cx + 100; y = cy - 60; }
+      else if (node.type === "ha") { x = cx - 100; y = cy - 60; }
       this.nodePositions.set(node.id, { x, y, vx: 0, vy: 0 });
     }
 
-    // Remove positions for nodes that no longer exist
+    // Clients in a ring around the router
+    const radius = Math.min(w, h) * 0.32;
+    let i = 0;
+    for (const node of clients) {
+      if (this.nodePositions.has(node.id)) continue;
+      const angle = (i / clients.length) * Math.PI * 2 - Math.PI / 2;
+      const r = radius + (Math.random() - 0.5) * radius * 0.4;
+      const x = cx + Math.cos(angle) * r;
+      const y = cy + Math.sin(angle) * r;
+      this.nodePositions.set(node.id, { x, y, vx: 0, vy: 0 });
+      i++;
+    }
+
+    // Clean old
     for (const id of this.nodePositions.keys()) {
       if (!this.graphData.nodes.find(n => n.id === id)) this.nodePositions.delete(id);
     }
@@ -520,14 +422,10 @@ class NetworkVisualizerCard extends HTMLElement {
     const wifi = this.graphData.nodes.filter(n => n.type.startsWith("wifi")).length;
     const zigbee = this.graphData.nodes.filter(n => n.type.startsWith("zigbee") || n.type === "zha-coordinator").length;
     const online = this.graphData.nodes.filter(n => n.online && !["internet", "router", "mesh", "ha"].includes(n.type)).length;
-    const f1 = this.graphData.nodes.filter(n => n.floor === 1 && !["internet", "router", "mesh", "ha"].includes(n.type)).length;
-    const f2 = this.graphData.nodes.filter(n => n.floor === 2).length;
     const el = (id: string) => this.shadow.getElementById(id);
     if (el("s-online")) el("s-online")!.textContent = String(online);
     if (el("s-wifi")) el("s-wifi")!.textContent = String(wifi);
     if (el("s-zigbee")) el("s-zigbee")!.textContent = String(zigbee);
-    if (el("s-f1")) el("s-f1")!.textContent = String(f1);
-    if (el("s-f2")) el("s-f2")!.textContent = String(f2);
   }
 
   private collectData(): GraphData {
@@ -535,96 +433,87 @@ class NetworkVisualizerCard extends HTMLElement {
     const links: NetworkLink[] = [];
     const config = this.config_!;
 
-    nodes.push({ id: "internet", name: "Internet", type: "internet", floor: 0, online: true, val: 4 });
-    nodes.push({ id: "router-main", name: config.router_name || "Router", type: "router", floor: 1, ip: "192.168.0.1", online: true, val: 14 });
-    links.push({ source: "internet", target: "router-main", strength: 1 });
+    nodes.push({ id: "internet", name: "Internet", type: "internet", floor: 0, online: true, val: 5 });
+    nodes.push({ id: "router", name: config.router_name || "Router", type: "router", floor: 1, ip: "192.168.0.1", online: true, val: 16 });
+    links.push({ source: "internet", target: "router", strength: 1 });
 
     if (config.mesh_name) {
-      nodes.push({ id: "router-mesh", name: config.mesh_name, type: "mesh", floor: 2, ip: "192.168.0.150", online: true, val: 12 });
-      links.push({ source: "router-main", target: "router-mesh", strength: 0.8 });
+      nodes.push({ id: "mesh", name: config.mesh_name, type: "mesh", floor: 2, ip: "192.168.0.150", online: true, val: 13 });
+      links.push({ source: "router", target: "mesh", strength: 0.8 });
     }
 
-    nodes.push({ id: "ha", name: "Home Assistant", type: "ha", floor: 1, ip: "192.168.0.185", online: true, val: 10 });
-    links.push({ source: "router-main", target: "ha", strength: 1 });
+    nodes.push({ id: "ha", name: "Home Assistant", type: "ha", floor: 1, ip: "192.168.0.185", online: true, val: 12 });
+    links.push({ source: "router", target: "ha", strength: 1 });
 
     const entity = this.hass_?.states[config.router_entity || "sensor.connected_clients"];
-    const clients = entity?.attributes?.clients || [];
-    for (const c of clients) {
-      const isOnline = c.online && c.ip !== "0.0.0.0" && c.ip;
-      if (!isOnline) continue;
+    for (const c of (entity?.attributes?.clients || [])) {
+      if (!c.online || c.ip === "0.0.0.0" || !c.ip) continue;
       const mac = c.mac?.toLowerCase();
-      const floor = determineFloor({ id: "", name: c.hostname || "", type: "wifi-client", floor: 1, online: true, mac } as NetworkNode, config);
       nodes.push({
-        id: `wifi-${mac}`, name: c.hostname || mac, type: "wifi-client",
-        floor, ip: c.ip, mac, signal: c.signal, band: c.band, online: true,
-        val: NODE_SIZES["wifi-client"],
+        id: `w-${mac}`, name: c.hostname || mac, type: "wifi-client",
+        floor: 1, ip: c.ip, mac, signal: c.signal, band: c.band, online: true, val: 6,
       });
-      const routerTarget = floor === 2 ? "router-mesh" : "router-main";
-      const strength = c.signal ? Math.max(0.1, Math.min(1, (c.signal + 90) / 50)) : 0.5;
-      links.push({ source: routerTarget, target: `wifi-${mac}`, strength });
+      links.push({ source: "router", target: `w-${mac}`, strength: c.signal ? Math.max(0.1, Math.min(1, (c.signal + 90) / 50)) : 0.5 });
     }
 
     if (this.zhaDevices) {
       const coord = this.zhaDevices.find((d: any) => d.device_type === "Coordinator");
       if (coord) {
-        nodes.push({ id: `zha-${coord.ieee}`, name: "ZHA Coordinator", type: "zha-coordinator", floor: 1, manufacturer: coord.manufacturer, model: coord.model, online: true, val: 8 });
-        links.push({ source: "ha", target: `zha-${coord.ieee}`, strength: 1 });
+        nodes.push({ id: `z-${coord.ieee}`, name: "ZHA Coordinator", type: "zha-coordinator", floor: 1, manufacturer: coord.manufacturer, model: coord.model, online: true, val: 8 });
+        links.push({ source: "ha", target: `z-${coord.ieee}`, strength: 1 });
       }
       for (const dev of this.zhaDevices) {
         if (dev.device_type === "Coordinator" || dev.available === false) continue;
-        const isRouter = dev.device_type === "Router";
-        const nodeType = isRouter ? "zigbee-router" as const : "zigbee-enddevice" as const;
         let name = dev.name || dev.model || dev.ieee;
         if (this.haDevices) {
           const haD = this.haDevices.find((d: any) => d.identifiers?.some((id: any[]) => id[1] === dev.ieee));
           if (haD?.name) name = haD.name;
         }
-        nodes.push({ id: `zha-${dev.ieee}`, name, type: nodeType, floor: 1, manufacturer: dev.manufacturer, model: dev.model, signal: dev.lqi, online: true, val: NODE_SIZES[nodeType] });
-        if (coord) links.push({ source: `zha-${coord.ieee}`, target: `zha-${dev.ieee}`, strength: dev.lqi ? Math.min(1, dev.lqi / 255) : 0.5 });
+        const t = dev.device_type === "Router" ? "zigbee-router" as const : "zigbee-enddevice" as const;
+        nodes.push({ id: `z-${dev.ieee}`, name, type: t, floor: 1, manufacturer: dev.manufacturer, model: dev.model, signal: dev.lqi, online: true, val: 5 });
+        if (coord) links.push({ source: `z-${coord.ieee}`, target: `z-${dev.ieee}`, strength: dev.lqi ? Math.min(1, dev.lqi / 255) : 0.5 });
       }
     }
-
     return { nodes, links };
   }
 
   private getSignalClass(n: NetworkNode): string {
     if (!n.signal) return "";
-    if (n.type.includes("zigbee")) return n.signal > 200 ? "signal-good" : n.signal > 100 ? "signal-ok" : "signal-weak";
-    return n.signal > -50 ? "signal-good" : n.signal > -70 ? "signal-ok" : "signal-weak";
+    if (n.type.includes("zigbee")) return n.signal > 200 ? "sg" : n.signal > 100 ? "so" : "sw";
+    return n.signal > -50 ? "sg" : n.signal > -70 ? "so" : "sw";
   }
 }
 
 const STYLES = `
   :host { display: block; height: 100%; }
-  .root { display: flex; flex-direction: column; height: 100vh; background: ${GRAPH_CONFIG.BACKGROUND_COLOR}; }
+  .root { display: flex; flex-direction: column; height: calc(100vh - 56px); background: ${GRAPH_CONFIG.BACKGROUND_COLOR}; }
   .canvas-wrap { flex: 1; position: relative; overflow: hidden; min-height: 0; }
   canvas { display: block; width: 100%; height: 100%; }
-  .tooltip { position: absolute; background: rgba(10,10,30,0.92); color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 11px; font-family: system-ui; line-height: 1.5; border: 1px solid rgba(100,150,255,0.25); pointer-events: none; z-index: 20; white-space: nowrap; }
-  .tooltip.hidden { display: none; }
-  .tooltip b { color: #00e5ff; }
-  .detail-panel { position: absolute; top: 12px; right: 12px; width: 260px; background: rgba(10,10,30,0.95); border: 1px solid rgba(100,150,255,0.2); border-radius: 12px; padding: 16px; font-family: system-ui; z-index: 15; }
-  .detail-panel.hidden { display: none; }
-  .detail-panel h3 { margin: 0 0 10px; color: #00e5ff; font-size: 14px; display: flex; align-items: center; }
-  .close-btn { margin-left: auto; cursor: pointer; color: rgba(255,255,255,0.5); font-size: 20px; border: none; background: none; }
-  .close-btn:hover { color: #fff; }
-  .detail-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; }
-  .detail-row .label { color: rgba(255,255,255,0.4); }
-  .detail-row .value { color: rgba(255,255,255,0.9); font-family: "SF Mono", monospace; font-size: 11px; }
-  .signal-good { color: #4caf50 !important; }
-  .signal-ok { color: #ff9800 !important; }
-  .signal-weak { color: #f44336 !important; }
-  .legend { display: flex; gap: 14px; padding: 8px 16px; font-size: 11px; background: rgba(10,10,30,0.5); }
-  .legend-item { display: flex; align-items: center; gap: 5px; color: rgba(255,255,255,0.45); }
-  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
-  .stats-bar { display: flex; gap: 18px; padding: 10px 16px; background: rgba(10,10,30,0.5); font-size: 13px; color: rgba(255,255,255,0.5); }
-  .stat { display: flex; align-items: center; gap: 6px; }
-  .stat .count { color: #00e5ff; font-weight: 700; font-size: 16px; }
-  .loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: rgba(255,255,255,0.4); font-size: 16px; font-family: system-ui; }
-  .loading.hidden { display: none; }
-  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
-  .loading { animation: pulse 1.5s infinite; }
+  .tip { position: absolute; background: rgba(8,8,25,0.92); color: #ccc; padding: 6px 10px; border-radius: 6px; font-size: 11px; font-family: system-ui; line-height: 1.4; border: 1px solid rgba(100,150,255,0.2); pointer-events: none; z-index: 20; white-space: nowrap; }
+  .tip.hidden { display: none; }
+  .tip b { color: #00e5ff; }
+  .det { position: absolute; top: 8px; right: 8px; width: 240px; background: rgba(8,8,25,0.95); border: 1px solid rgba(100,150,255,0.2); border-radius: 10px; padding: 14px; font-family: system-ui; z-index: 15; }
+  .det.hidden { display: none; }
+  .det h3 { margin: 0 0 8px; color: #00e5ff; font-size: 13px; display: flex; align-items: center; gap: 4px; }
+  .xbtn { margin-left: auto; cursor: pointer; color: rgba(255,255,255,0.4); font-size: 18px; border: none; background: none; line-height: 1; }
+  .xbtn:hover { color: #fff; }
+  .dr { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 11px; }
+  .dl { color: rgba(255,255,255,0.35); }
+  .dv { color: rgba(255,255,255,0.85); font-family: "SF Mono", monospace; font-size: 10px; }
+  .sg { color: #4caf50 !important; }
+  .so { color: #ff9800 !important; }
+  .sw { color: #f44336 !important; }
+  .legend { display: flex; gap: 14px; padding: 6px 16px; font-size: 10px; background: rgba(8,8,25,0.5); }
+  .li { display: flex; align-items: center; gap: 4px; color: rgba(255,255,255,0.4); }
+  .ld { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .stats-bar { display: flex; gap: 16px; padding: 8px 16px; background: rgba(8,8,25,0.5); font-size: 12px; color: rgba(255,255,255,0.45); }
+  .stat { display: flex; align-items: center; gap: 5px; }
+  .stat .count { color: #00e5ff; font-weight: 700; font-size: 15px; }
+  .load { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: rgba(255,255,255,0.35); font-size: 15px; font-family: system-ui; animation: pulse 1.5s infinite; }
+  .load.hidden { display: none; }
+  @keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 0.8; } }
 `;
 
 customElements.define("network-visualizer-card", NetworkVisualizerCard);
 (window as any).customCards = (window as any).customCards || [];
-(window as any).customCards.push({ type: "network-visualizer-card", name: "Network Visualizer", description: "2D home network topology with floor plan", preview: false });
+(window as any).customCards.push({ type: "network-visualizer-card", name: "Network Visualizer", description: "2D network topology", preview: false });
