@@ -83,6 +83,7 @@ export interface CardConfig {
   mesh_name?: string;
   mesh_ip?: string;
   known_devices?: Record<string, { name: string; floor: number; category: string }>;
+  known_macs?: string[]; // MACs with DHCP reservations — devices not in this list are highlighted as unknown
   height?: number;
 }
 
